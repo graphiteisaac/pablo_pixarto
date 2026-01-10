@@ -49,6 +49,7 @@ pub fn main() -> Nil {
   let state = AppState(client, last_updated, uris, channel_id)
   let gateway_start_result =
     gateway.new(identify, state)
+    |> gateway.on_event(handle_event)
     |> gateway.start()
 
   case gateway_start_result {
@@ -68,6 +69,24 @@ pub fn main() -> Nil {
   }
 
   Nil
+}
+
+fn handle_event(
+  state: AppState,
+  event: gateway.Event,
+  _connection: gateway.Connection(AppState),
+) {
+  case event {
+    gateway.ErrorEvent(error) -> {
+      logging.log(logging.Error, "[discord] " <> string.inspect(error))
+      gateway.continue(state)
+    }
+    gateway.ReadyEvent(_) -> {
+      logging.log(logging.Info, "Bot is ready!")
+      gateway.continue(state)
+    }
+    _ -> gateway.continue(state)
+  }
 }
 
 fn schedule_check(state: AppState) -> Nil {
