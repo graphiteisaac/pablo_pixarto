@@ -1,5 +1,6 @@
 services:
   pablo_pixarto_bot:
+    container_name: pablo_pixarto
     build: .
     restart: unless-stopped
     volumes:

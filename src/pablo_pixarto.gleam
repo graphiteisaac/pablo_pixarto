@@ -16,6 +16,7 @@ import gleam/set.{type Set}
 import gleam/string
 import gleam/time/timestamp.{type Timestamp}
 import grom
+import grom/activity
 import grom/gateway
 import grom/gateway/intent
 import grom/message
@@ -57,7 +58,7 @@ pub fn main() -> Nil {
       logging.log(logging.Info, "Started the gateway!")
 
       let state = check_and_post(state)
-      schedule_check(state)
+      process.spawn(fn() { schedule_check(state) })
       process.sleep_forever()
     }
     Error(err) -> {
@@ -74,19 +75,32 @@ pub fn main() -> Nil {
 fn handle_event(
   state: AppState,
   event: gateway.Event,
-  _connection: gateway.Connection(AppState),
+  connection: gateway.Connection(AppState),
 ) {
   case event {
     gateway.ErrorEvent(error) -> {
       logging.log(logging.Error, "[discord] " <> string.inspect(error))
       gateway.continue(state)
     }
-    gateway.ReadyEvent(_) -> {
-      logging.log(logging.Info, "Bot is ready!")
-      gateway.continue(state)
-    }
+    gateway.ReadyEvent(_) -> on_ready(state, connection)
     _ -> gateway.continue(state)
   }
+}
+
+fn on_ready(state: AppState, connection: gateway.Connection(AppState)) {
+  logging.log(logging.Info, "Ready!")
+
+  connection
+  |> gateway.update_presence(using: gateway.UpdatePresenceMessage(
+    status: gateway.Online,
+    since: option.None,
+    activities: [
+      activity.new(named: "🖌️ Checking for themes...", type_: activity.Custom),
+    ],
+    is_afk: False,
+  ))
+
+  gateway.continue(state)
 }
 
 fn schedule_check(state: AppState) -> Nil {
