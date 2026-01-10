@@ -1,0 +1,6 @@
+services:
+  pablo_pixarto_bot:
+    build: .
+    volumes:
+      - "./db.json:/app/db.json"
+    env_file: .env
