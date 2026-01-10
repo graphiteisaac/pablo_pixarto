@@ -1,5 +1,3 @@
-import gleam/http/request
-import gleam/httpc
 import gleeunit
 import pablo_pixarto
 
@@ -21,7 +19,9 @@ pub fn retrieve_bluesky_feed_test() {
   let actor = "isaacary.com"
   let limit = 1
 
-  let assert Ok(feed) =
-    pablo_pixarto.latest_bsky_posts(actor, limit)
-    |> echo
+  let assert Ok(feed) = pablo_pixarto.latest_bsky_posts(actor, limit)
+
+  echo feed
+
+  assert feed != []
 }

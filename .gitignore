@@ -2,3 +2,10 @@
 *.ez
 /build
 erl_crash.dump
+
+# Database
+db.json
+posted.txt
+
+# Dev config
+.env

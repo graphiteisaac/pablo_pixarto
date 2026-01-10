@@ -1,41 +1,91 @@
+import dotenv_gleam
+import envoy
 import gleam/dynamic/decode
+import gleam/erlang/process
+import gleam/float
 import gleam/hackney
 import gleam/http/request
 import gleam/http/response
 import gleam/int
 import gleam/json
 import gleam/list
+import gleam/option
+import gleam/order
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
+import gleam/time/timestamp.{type Timestamp}
 import grom
+import grom/gateway
+import grom/gateway/intent
+import grom/message
 import logging
 import simplifile
 
 const bluesky_api_base = "https://public.api.bsky.app"
 
-const uris_file = "posted.txt"
-
-const bluesky_actor = "pixeldailies.bsky.app"
+const bluesky_actor = "pixeldailies.bsky.social"
 
 const check_interval_ms = 60_000
 
 pub fn main() -> Nil {
-  let actor = "isaacary.com"
-  let limit = 1
+  logging.configure()
 
-  let assert Ok(feed) =
-    latest_bsky_posts(actor, limit)
-    |> echo
+  // We can safely void this result and not care if it's an error
+  // because we are using dotenv in development, but not production.
+  let _ = dotenv_gleam.config()
+
+  let assert Ok(token) = envoy.get("BOT_TOKEN")
+  let assert Ok(channel_id) = envoy.get("CHANNEL_ID")
+
+  // Load the cached values fro last updated and the list of posted URIs
+  let #(uris, last_updated) = load_cache()
+
+  let client = grom.Client(token:)
+  let identify =
+    client
+    |> gateway.identify(intents: [intent.Guilds, intent.GuildMessages])
+
+  let state = AppState(client, last_updated, uris, channel_id)
+  let gateway_start_result =
+    gateway.new(identify, state)
+    |> gateway.start()
+
+  case gateway_start_result {
+    Ok(_) -> {
+      logging.log(logging.Info, "Started the gateway!")
+
+      let state = check_and_post(state)
+      schedule_check(state)
+      process.sleep_forever()
+    }
+    Error(err) -> {
+      logging.log(
+        logging.Error,
+        "Couldn't start the gateway: " <> string.inspect(err),
+      )
+    }
+  }
 
   Nil
+}
+
+fn schedule_check(state: AppState) -> Nil {
+  // Sleep for the interval
+  process.sleep(check_interval_ms)
+
+  // Check for new posts
+  let new_state = check_and_post(state)
+
+  // Schedule next check
+  schedule_check(new_state)
 }
 
 pub type BlueskyPost {
   BlueskyPost(
     uri: String,
     text: String,
-    created_at: String,
+    created_at: Timestamp,
     author_handle: String,
   )
 }
@@ -48,7 +98,16 @@ fn bluesky_post_decoder() -> decode.Decoder(BlueskyPost) {
   use text <- decode.subfield(["post", "record", "text"], decode.string)
   use created_at <- decode.subfield(
     ["post", "record", "createdAt"],
-    decode.string,
+    decode.then(decode.string, fn(str) {
+      case timestamp.parse_rfc3339(str) {
+        Ok(ts) -> decode.success(ts)
+        Error(_) ->
+          decode.failure(
+            timestamp.from_unix_seconds(0),
+            "could not parse RFD3339 timestamp",
+          )
+      }
+    }),
   )
   use author_handle <- decode.subfield(
     ["post", "author", "handle"],
@@ -59,7 +118,26 @@ fn bluesky_post_decoder() -> decode.Decoder(BlueskyPost) {
 }
 
 type AppState {
-  AppState(client: grom.Client, posted_uris: Set(String))
+  AppState(
+    client: grom.Client,
+    last_updated: Timestamp,
+    posted_uris: Set(String),
+    channel_id: String,
+  )
+}
+
+fn post_to_discord(state: AppState, post: BlueskyPost) {
+  let content =
+    message.Create(..message.new_create(), content: option.Some(post.uri))
+
+  case message.create(state.client, state.channel_id, content) {
+    Ok(_) -> logging.log(logging.Info, "[discord] message sent")
+    Error(err) ->
+      logging.log(
+        logging.Error,
+        "[discord] failed to send message: " <> string.inspect(err),
+      )
+  }
 }
 
 fn check_and_post(state: AppState) -> AppState {
@@ -69,6 +147,9 @@ fn check_and_post(state: AppState) -> AppState {
         list.filter(posts, fn(post) {
           has_theme_and_tag(post.text)
           && !set.contains(state.posted_uris, post.uri)
+          && {
+            timestamp.compare(post.created_at, state.last_updated) == order.Gt
+          }
         })
 
       case matched {
@@ -81,17 +162,28 @@ fn check_and_post(state: AppState) -> AppState {
             "Found a matching post: " <> matching.text <> " at " <> matching.uri,
           )
 
-          // TODO: Make this real
-          // post_to_discord(state.client, matching)
+          post_to_discord(state, matching)
+
+          case write_cache(matching) {
+            Ok(_) ->
+              logging.log(
+                logging.Info,
+                "[io] saved uri and latest timestamp for post",
+              )
+            Error(err) ->
+              logging.log(
+                logging.Error,
+                "[io] failed to save new uri: " <> string.inspect(err),
+              )
+          }
 
           AppState(
             ..state,
+            last_updated: matching.created_at,
             posted_uris: set.insert(state.posted_uris, matching.uri),
           )
         }
       }
-
-      state
     }
     Error(err) -> {
       logging.log(
@@ -161,28 +253,50 @@ fn atproto_uri_to_bsky_web(atproto_uri: String) -> String {
   }
 }
 
-pub fn load_posted_uris() -> Set(String) {
-  case simplifile.read(uris_file) {
-    Ok(content) ->
-      content
-      |> string.split("\n")
-      |> list.map(string.trim)
-      |> list.filter(string.is_empty)
-      |> set.from_list()
+const cache_file = "db.json"
+
+pub fn load_cache() -> #(Set(String), Timestamp) {
+  case simplifile.read(cache_file) {
+    Ok(content) -> {
+      let decoder = {
+        use posts <- decode.field("posts", decode.list(decode.string))
+        use last_updated <- decode.field(
+          "lastUpdate",
+          decode.map(decode.int, timestamp.from_unix_seconds),
+        )
+
+        decode.success(#(set.from_list(posts), last_updated))
+      }
+
+      let assert Ok(data) = json.parse(content, decoder)
+
+      data
+    }
     Error(_) -> {
       logging.log(
         logging.Info,
-        "No existing uris text file ("
-          <> uris_file
-          <> "), starting a fresh list!",
+        "[cache] no existing cache file, creating " <> cache_file,
       )
-      set.new()
+      let _ = simplifile.write(cache_file, "{\"lastUpdate\": 0,\n\"posts\":[]}")
+
+      #(set.new(), timestamp.from_unix_seconds(0))
     }
   }
 }
 
-pub fn save_new_uri(post_uri: String) -> Result(Nil, simplifile.FileError) {
-  let line = post_uri <> "\n"
+pub fn write_cache(post: BlueskyPost) -> Result(Nil, simplifile.FileError) {
+  let #(posts, _) = load_cache()
+  let posts = set.insert(posts, post.uri)
 
-  simplifile.append(uris_file, line)
+  let updated =
+    json.object([
+      #(
+        "lastUpdate",
+        json.int(float.round(timestamp.to_unix_seconds(post.created_at))),
+      ),
+      #("posts", json.array(set.to_list(posts), json.string)),
+    ])
+    |> json.to_string
+
+  simplifile.write(cache_file, updated)
 }
