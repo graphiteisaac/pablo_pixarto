@@ -1,6 +1,7 @@
 services:
   pablo_pixarto_bot:
     build: .
+    restart: unless-stopped
     volumes:
       - "./db.json:/app/db.json"
     env_file: .env
