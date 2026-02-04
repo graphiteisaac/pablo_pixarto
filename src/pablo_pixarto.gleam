@@ -164,7 +164,18 @@ fn post_to_discord(state: AppState, post: BlueskyPost) {
     message.Create(..message.new_create(), content: option.Some(post.uri))
 
   case message.create(state.client, state.channel_id, content) {
-    Ok(_) -> logging.log(logging.Info, "[discord] message sent")
+    Ok(msg) -> {
+      case message.crosspost(state.client, state.channel_id, msg.id) {
+        Ok(_) ->
+          logging.log(logging.Info, "[discord] published (announced) message")
+        Error(err) ->
+          logging.log(
+            logging.Error,
+            "[discord] failed to announce message: " <> string.inspect(err),
+          )
+      }
+      logging.log(logging.Info, "[discord] message sent")
+    }
     Error(err) ->
       logging.log(
         logging.Error,
