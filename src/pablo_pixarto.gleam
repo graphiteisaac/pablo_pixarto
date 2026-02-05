@@ -58,7 +58,6 @@ pub fn main() -> Nil {
     Ok(_) -> {
       logging.log(logging.Info, "Started the gateway!")
 
-      let state = check_and_post(state)
       process.spawn(fn() { schedule_check(state) })
       process.sleep_forever()
     }
@@ -105,11 +104,11 @@ fn on_ready(state: AppState, connection: gateway.Connection(AppState)) {
 }
 
 fn schedule_check(state: AppState) -> Nil {
+  // Check for new posts first
+  let new_state = check_and_post(state)
+
   // Sleep for the interval
   process.sleep(check_interval_ms)
-
-  // Check for new posts
-  let new_state = check_and_post(state)
 
   // Schedule next check
   schedule_check(new_state)
