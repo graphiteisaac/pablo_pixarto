@@ -1,3 +1,5 @@
+import gleam/time/duration
+import gleam/time/timestamp
 import gleeunit
 import pablo_pixarto
 
@@ -24,4 +26,14 @@ pub fn retrieve_bluesky_feed_test() {
   echo feed
 
   assert feed != []
+}
+
+pub fn timestamp_5minsago_test() {
+  echo timestamp.system_time()
+    |> timestamp.to_rfc3339(duration.seconds(0))
+
+  timestamp.system_time()
+  |> timestamp.add(duration.minutes(-5))
+  |> timestamp.to_rfc3339(duration.seconds(0))
+  |> echo
 }

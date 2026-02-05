@@ -14,6 +14,7 @@ import gleam/order
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
+import gleam/time/duration
 import gleam/time/timestamp.{type Timestamp}
 import grom
 import grom/activity
@@ -187,13 +188,20 @@ fn post_to_discord(state: AppState, post: BlueskyPost) {
 fn check_and_post(state: AppState) -> AppState {
   case latest_bsky_posts(bluesky_actor, 50) {
     Ok(posts) -> {
+      // Only make posts that have existed for at least 5 minutes
+      let now = timestamp.system_time()
+      let timeago = fn(minutes: Int) {
+        timestamp.add(now, duration.minutes(minutes * -1))
+      }
+
       let matched =
         list.filter(posts, fn(post) {
           has_theme_and_tag(post.text)
           && !set.contains(state.posted_uris, post.uri)
-          && {
-            timestamp.compare(post.created_at, state.last_updated) == order.Gt
-          }
+          // Older than 1 minute
+          && timestamp.compare(post.created_at, timeago(1)) == order.Lt
+          // Newer than a few minutes ago
+          && timestamp.compare(post.created_at, timeago(3)) == order.Gt
         })
 
       case matched {
