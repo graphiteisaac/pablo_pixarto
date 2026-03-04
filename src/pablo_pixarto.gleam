@@ -44,22 +44,29 @@ pub fn main() -> Nil {
   let #(uris, last_updated) = load_cache()
 
   let client = grom.Client(token:)
+
+  // Make sure we have the correct intents for our identity
   let identify =
     client
     |> gateway.identify(intents: [intent.Guilds, intent.GuildMessages])
 
-  let state = AppState(client, last_updated, uris, channel_id)
+  // Create our central app state
+  let assert Ok(data) = gateway.get_data(client)
+
   let gateway_start_result =
-    gateway.new(identify, state)
+    gateway.new_with_initializer(
+      fn(gateway) {
+        Ok(AppState(client, last_updated, uris, channel_id, gateway))
+      },
+      identify,
+      data,
+    )
     |> gateway.on_event(handle_event)
     |> gateway.start()
 
   case gateway_start_result {
     Ok(_) -> {
       logging.log(logging.Info, "Started the gateway!")
-
-      process.spawn(fn() { schedule_check(state) })
-      process.sleep_forever()
     }
     Error(err) -> {
       logging.log(
@@ -72,33 +79,33 @@ pub fn main() -> Nil {
   Nil
 }
 
-fn handle_event(
-  state: AppState,
-  event: gateway.Event,
-  connection: gateway.Connection(AppState),
-) {
+fn handle_event(state: AppState, event: gateway.Event) {
   case event {
     gateway.ErrorEvent(error) -> {
       logging.log(logging.Error, "[discord] " <> string.inspect(error))
       gateway.continue(state)
     }
-    gateway.ReadyEvent(_) -> on_ready(state, connection)
+    gateway.ReadyEvent(_) | gateway.AllShardsReadyEvent(_) -> on_ready(state)
     _ -> gateway.continue(state)
   }
 }
 
-fn on_ready(state: AppState, connection: gateway.Connection(AppState)) {
+fn on_ready(state: AppState) -> gateway.Next(AppState) {
   logging.log(logging.Info, "Ready!")
 
-  connection
-  |> gateway.update_presence(using: gateway.UpdatePresenceMessage(
-    status: gateway.Online,
-    since: option.None,
-    activities: [
-      activity.new(named: "🖌️ Checking for themes...", type_: activity.Custom),
-    ],
-    is_afk: False,
-  ))
+  gateway.update_presence(
+    state.gateway,
+    using: gateway.UpdatePresenceMessage(
+      status: gateway.Online,
+      since: option.None,
+      activities: [
+        activity.new(named: "🖌️ Checking for themes...", type_: activity.Custom),
+      ],
+      is_afk: False,
+    ),
+  )
+
+  process.spawn(fn() { schedule_check(state) })
 
   gateway.continue(state)
 }
@@ -156,6 +163,7 @@ type AppState {
     last_updated: Timestamp,
     posted_uris: Set(String),
     channel_id: String,
+    gateway: process.Subject(gateway.Message),
   )
 }
 
