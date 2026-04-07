@@ -1,25 +1,35 @@
-type state = {
-  last_seen_uri : string option;
-  last_update : int;
-  posts : string list;
-}
+open Pablo_pixarto
 
-type post = {
-  uri : string;
-  text : string;
-  url : string;
-}
+let () = Lwt_main.run (Pablo_pixarto.run ())
 
-let discord_webhook_url = Sys.getenv "DISCORD_WEBHOOK_URL"
-let bluesky_handle = "pixeldailies.bsky.social"
-let db_file = "db.json"
-let filter_tags = [ "#theme"; "#set"; "#tileset" ]
+(* open Unix *)
 
-let load_db () =
-  if Sys.file_exists db_file then
-    let json = Yojson.Safe.from_file db_file in
-    match state_of_yojson with
-    | Ok s -> s
-    | Error _ -> { last_seen_uri = None; last_update = 0; posts = [] }
-  else
-    { last_seen_uri = None; last_update = 0; posts = [] }
+(**)
+(* (*********************** *)
+   (*  * Config  *)
+   (*  ***********************) *)
+(* let discord_webhook_url = Sys.getenv "DISCORD_WEBHOOK_URL" *)
+(* let bluesky_handle = "pixeldailies.bsky.social" *)
+(* let db_file = "db.json" *)
+(* let filter_tags = [ "#theme"; "#set"; "#tileset" ] *)
+(**)
+(* (*********************** *)
+   (*  * Our "database" (a single JSON file :3) *)
+   (*  ***********************) *)
+(**)
+(* let already_posted db url = List.mem url db.posts *)
+(**)
+(* (* When saving, append new URLs and update the timestamp *) *)
+(* (* let new_db = *) *)
+(* (* let now = int_of_float (Unix.time ()) in *) *)
+(* (* let new_urls = List.map (fun p -> p.url) tagged in *) *)
+(* (* { *) *)
+(* (*   last_update = now;  *) *)
+(* (*     posts = db.posts @ new_urls; *) *)
+(* (* } in save_db new_db; *) *)
+(**)
+(* type post = { *)
+(*   uri : string; *)
+(*   text : string; *)
+(*   url : string; *)
+(* } *)
