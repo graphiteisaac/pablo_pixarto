@@ -1,3 +1,22 @@
+(***********************
+ * Config
+ ***********************)
+let discord_token = Sys.getenv "DISCORD_BOT_TOKEN"
+let discord_channel_id = Sys.getenv "DISCORD_CHANNEL_ID"
+let bluesky_handle = "pixeldailies.bsky.social"
+let db_file = "db.json"
+let filter_tags = [ "#theme"; "#set"; "#tileset" ]
+
+(* type post = { *)
+(*   uri : string; *)
+(*   text : string; *)
+(*   url : string; *)
+(* } *)
+
+(***********************
+ * Database types and functions
+ ***********************)
+
 type db = {
   last_update : int;
   posts : string list;
