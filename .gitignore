@@ -1,6 +1,7 @@
 *.beam
 *.ez
 /build
+bot/build
 erl_crash.dump
 
 # Database
