@@ -1,0 +1,20 @@
+(lang dune 3.22)
+
+(name pablo_pixarto)
+
+(generate_opam_files true)
+
+(source
+ (tangled @isaac.tngl.sh/pablo_pixarto))
+
+(authors "Isaac <isaac@grphcrtv.com>")
+
+(maintainers "Isaac <isaac@grphcrtv.com>")
+
+(license "Apache-2.0" )
+
+(package
+ (name pablo_pixarto)
+ (synopsis "Webhook application to send pixel daily themes to Discord")
+ (description "A small OCaml appliaction to retrieve the latest pixel dailies posts from Bluesky (pixeldailies.bsky.social) and send them to the Pixel Paradise Discord server via webhook. This replaces a heavier Gleam-based full bot, which was computationally much heavier and found to be not necessary.")
+ (depends ocaml))
