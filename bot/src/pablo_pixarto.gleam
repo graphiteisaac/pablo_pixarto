@@ -1,3 +1,4 @@
+import argv
 import dotenv_gleam
 import envoy
 import gleam/dynamic/decode
@@ -6,7 +7,9 @@ import gleam/float
 import gleam/hackney
 import gleam/http/request
 import gleam/http/response
+import gleam/httpc
 import gleam/int
+import gleam/io
 import gleam/json
 import gleam/list
 import gleam/option
@@ -33,6 +36,29 @@ const check_interval_ms = 60_000
 pub fn main() -> Nil {
   logging.configure()
 
+  case argv.load().arguments {
+    ["bot"] -> bot()
+    ["single"] -> single()
+    _ -> io.println("Usage:\n\tgleam run {bot|single}")
+  }
+}
+
+fn single() -> Nil {
+  case latest_bsky_posts(bluesky_actor, 50) {
+    Ok(posts) -> {
+      list.each(posts, fn(post) {
+        io.println("\t" <> string.inspect(post.created_at) <> "\t" <> post.text)
+      })
+      Nil
+    }
+    Error(err) -> {
+      echo err
+      Nil
+    }
+  }
+}
+
+fn bot() -> Nil {
   // We can safely void this result and not care if it's an error
   // because we are using dotenv in development, but not production.
   let _ = dotenv_gleam.config()
@@ -279,7 +305,7 @@ pub fn latest_bsky_posts(
     |> request.set_header("connection", "keep-alive")
     |> request.set_header("user-agent", "pablo_pixarto/bot1.0.0")
 
-  case hackney.send(req) {
+  case httpc.send(req) {
     Ok(response.Response(status:, body:, ..)) if status == 200 ->
       parse_bluesky_posts(body)
 
