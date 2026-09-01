@@ -20,7 +20,6 @@ import gleam/string
 import gleam/time/calendar
 import gleam/time/duration
 import gleam/time/timestamp.{type Timestamp}
-import gleam/uri
 import gleam_community/ansi
 import grom
 import grom/activity
