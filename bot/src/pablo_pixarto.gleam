@@ -4,7 +4,7 @@ import envoy
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/float
-import gleam/hackney
+import gleam/http
 import gleam/http/request
 import gleam/http/response
 import gleam/httpc
@@ -17,8 +17,11 @@ import gleam/order
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
+import gleam/time/calendar
 import gleam/time/duration
 import gleam/time/timestamp.{type Timestamp}
+import gleam/uri
+import gleam_community/ansi
 import grom
 import grom/activity
 import grom/gateway
@@ -27,7 +30,7 @@ import grom/message
 import logging
 import simplifile
 
-const bluesky_api_base = "https://public.api.bsky.app"
+const bluesky_api_base = "public.api.bsky.app"
 
 const bluesky_actor = "pixeldailies.bsky.social"
 
@@ -38,16 +41,32 @@ pub fn main() -> Nil {
 
   case argv.load().arguments {
     ["bot"] -> bot()
-    ["single"] -> single()
-    _ -> io.println("Usage:\n\tgleam run {bot|single}")
+    ["list"] -> list_posts()
+    _ -> io.println("Usage:\n\tgleam run <bot|list>")
   }
 }
 
-fn single() -> Nil {
+fn list_posts() -> Nil {
   case latest_bsky_posts(bluesky_actor, 50) {
     Ok(posts) -> {
       list.each(posts, fn(post) {
-        io.println("\t" <> string.inspect(post.created_at) <> "\t" <> post.text)
+        io.print(
+          "\n- "
+          <> case post.is_repost {
+            True -> ansi.blue("REPOST")
+            False -> ansi.green("POST  ")
+          }
+          <> " "
+          <> ansi.gray(post.uri)
+          <> "\n\t"
+          <> post.text
+          <> "\n- "
+          <> ansi.gray(timestamp.to_rfc3339(
+            post.created_at,
+            calendar.local_offset(),
+          ))
+          <> "\n\n",
+        )
       })
       Nil
     }
@@ -153,6 +172,7 @@ pub type BlueskyPost {
     text: String,
     created_at: Timestamp,
     author_handle: String,
+    is_repost: Bool,
   )
 }
 
@@ -180,7 +200,18 @@ fn bluesky_post_decoder() -> decode.Decoder(BlueskyPost) {
     decode.string,
   )
 
-  decode.success(BlueskyPost(uri, text:, created_at:, author_handle:))
+  use is_repost <- decode.optional_field("reason", False, {
+    use type_ <- decode.field("$type", decode.string)
+    decode.success(type_ == "app.bsky.feed.defs#reasonRepost")
+  })
+
+  decode.success(BlueskyPost(
+    uri:,
+    text:,
+    created_at:,
+    author_handle:,
+    is_repost:,
+  ))
 }
 
 type AppState {
@@ -229,12 +260,16 @@ fn check_and_post(state: AppState) -> AppState {
 
       let matched =
         list.filter(posts, fn(post) {
+          // Contains a theme and the required tag
           has_theme_and_tag(post.text)
+          // Hasn't already been posted
           && !set.contains(state.posted_uris, post.uri)
           // Older than 1 minute
           && timestamp.compare(post.created_at, timeago(1)) == order.Lt
           // Newer than a few minutes ago
           && timestamp.compare(post.created_at, timeago(3)) == order.Gt
+          // Not a repost
+          && !post.is_repost
         })
 
       case matched {
@@ -284,24 +319,22 @@ fn check_and_post(state: AppState) -> AppState {
 fn has_theme_and_tag(post_content: String) -> Bool {
   let lowercase = string.lowercase(post_content)
 
-  string.contains(lowercase, "theme") && string.contains(lowercase, "#")
+  {
+    string.contains(lowercase, "task is") || string.contains(lowercase, "theme")
+  }
+  && string.contains(lowercase, "#")
 }
 
 pub fn latest_bsky_posts(
   actor: String,
   limit: Int,
 ) -> Result(List(BlueskyPost), String) {
-  let url =
-    bluesky_api_base
-    <> "/xrpc/app.bsky.feed.getAuthorFeed?actor="
-    <> actor
-    <> "&limit="
-    <> int.to_string(limit)
-
-  let assert Ok(req) = request.to(url)
-
   let req =
-    req
+    request.new()
+    |> request.set_scheme(http.Https)
+    |> request.set_host(bluesky_api_base)
+    |> request.set_path("/xrpc/app.bsky.feed.getAuthorFeed")
+    |> request.set_query([#("actor", actor), #("limit", int.to_string(limit))])
     |> request.set_header("connection", "keep-alive")
     |> request.set_header("user-agent", "pablo_pixarto/bot1.0.0")
 
