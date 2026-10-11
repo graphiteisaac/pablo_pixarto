@@ -1,5 +1,9 @@
 import argv
-import dotenv_gleam
+import disco
+import disco/api
+import disco/client
+import disco/gateway
+import disco/rest
 import envoy
 import gleam/dynamic/decode
 import gleam/erlang/process
@@ -12,8 +16,10 @@ import gleam/int
 import gleam/io
 import gleam/json
 import gleam/list
-import gleam/option
 import gleam/order
+import gleam/otp/actor
+import gleam/otp/static_supervisor as supervisor
+import gleam/otp/supervision
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
@@ -21,11 +27,6 @@ import gleam/time/calendar
 import gleam/time/duration
 import gleam/time/timestamp.{type Timestamp}
 import gleam_community/ansi
-import grom
-import grom/activity
-import grom/gateway
-import grom/gateway/intent
-import grom/message
 import logging
 import simplifile
 
@@ -34,6 +35,14 @@ const bluesky_api_base = "public.api.bsky.app"
 const bluesky_actor = "pixeldailies.bsky.social"
 
 const check_interval_ms = 60_000
+
+type AppState {
+  AppState(
+    last_updated: Timestamp,
+    posted_uris: Set(String),
+    channel_id: String,
+  )
+}
 
 pub fn main() -> Nil {
   logging.configure()
@@ -77,93 +86,81 @@ fn list_posts() -> Nil {
 }
 
 fn bot() -> Nil {
-  // We can safely void this result and not care if it's an error
-  // because we are using dotenv in development, but not production.
-  let _ = dotenv_gleam.config()
-
   let assert Ok(token) = envoy.get("BOT_TOKEN")
+    as "no BOT_TOKEN variable provided"
   let assert Ok(channel_id) = envoy.get("CHANNEL_ID")
+    as "not CHANNEL_ID variable provided"
 
   // Load the cached values fro last updated and the list of posted URIs
   let #(uris, last_updated) = load_cache()
 
-  let client = grom.Client(token:)
+  let client =
+    disco.new(token)
+    |> disco.with_intents([
+      client.GuildsIntent,
+    ])
 
-  // Make sure we have the correct intents for our identity
-  let identify =
-    client
-    |> gateway.identify(intents: [intent.Guilds, intent.GuildMessages])
+  process.trap_exits(True)
 
-  // Create our central app state
-  let assert Ok(data) = gateway.get_data(client)
+  let initial_state = AppState(last_updated, uris, channel_id)
 
-  let gateway_start_result =
-    gateway.new_with_initializer(
-      fn(gateway) {
-        Ok(AppState(client, last_updated, uris, channel_id, gateway))
-      },
-      identify,
-      data,
-    )
-    |> gateway.on_event(handle_event)
-    |> gateway.start()
+  let bot = disco.supervised(client:, on_event:, initial_state:)
+  let scheduler = schedule_child(client, initial_state)
 
-  case gateway_start_result {
-    Ok(_) -> {
-      logging.log(logging.Info, "Started the gateway!")
-    }
-    Error(err) -> {
-      logging.log(
-        logging.Error,
-        "Couldn't start the gateway: " <> string.inspect(err),
-      )
-    }
-  }
+  let _ =
+    supervisor.new(supervisor.OneForOne)
+    |> supervisor.add(supervision.supervisor(fn() { bot }))
+    |> supervisor.add(supervision.supervisor(fn() { scheduler }))
+    |> supervisor.start
 
-  Nil
+  process.sleep_forever()
 }
 
-fn handle_event(state: AppState, event: gateway.Event) {
-  case event {
-    gateway.ErrorEvent(error) -> {
-      logging.log(logging.Error, "[discord] " <> string.inspect(error))
-      gateway.continue(state)
+fn on_event(
+  state: #(gateway.GatewayState, AppState),
+  msg: gateway.GatewayEvent,
+) {
+  case msg {
+    gateway.Ready(session_id:, ..) -> {
+      logging.log(logging.Info, "Bot connected and ready!")
+      logging.log(logging.Info, "Session ID: " <> session_id)
+
+      actor.continue(state)
     }
-    gateway.ReadyEvent(_) | gateway.AllShardsReadyEvent(_) -> on_ready(state)
-    _ -> gateway.continue(state)
+    _ -> actor.continue(state)
   }
 }
 
-fn on_ready(state: AppState) -> gateway.Next(AppState) {
-  logging.log(logging.Info, "Ready!")
+// 
+// # Scheduled checking logic
+//
 
-  gateway.update_presence(
-    state.gateway,
-    using: gateway.UpdatePresenceMessage(
-      status: gateway.Online,
-      since: option.None,
-      activities: [
-        activity.new(named: "🖌️ Checking for themes...", type_: activity.Custom),
-      ],
-      is_afk: False,
-    ),
-  )
-
-  process.spawn(fn() { schedule_check(state) })
-
-  gateway.continue(state)
+type ScheduleMsg {
+  ScheduleTick
 }
 
-fn schedule_check(state: AppState) -> Nil {
-  // Check for new posts first
-  let new_state = check_and_post(state)
-
-  // Sleep for the interval
-  process.sleep(check_interval_ms)
-
-  // Schedule next check
-  schedule_check(new_state)
+fn schedule_child(
+  client: client.Client,
+  state: AppState,
+) -> Result(actor.Started(process.Subject(ScheduleMsg)), actor.StartError) {
+  actor.new(state)
+  |> actor.on_message(fn(state, msg) {
+    case msg {
+      ScheduleTick -> {
+        logging.log(logging.Info, "[bluesky] checking for new posts")
+        let new_state = check_and_post(client, state)
+        let self = process.new_subject()
+        process.send_after(self, check_interval_ms, ScheduleTick)
+        actor.continue(new_state)
+      }
+    }
+  })
+  |> actor.start
 }
+
+//
+// # Bluesky 
+// 
 
 pub type BlueskyPost {
   BlueskyPost(
@@ -213,42 +210,40 @@ fn bluesky_post_decoder() -> decode.Decoder(BlueskyPost) {
   ))
 }
 
-type AppState {
-  AppState(
-    client: grom.Client,
-    last_updated: Timestamp,
-    posted_uris: Set(String),
-    channel_id: String,
-    gateway: process.Subject(gateway.Message),
-  )
-}
+//
+// # Posting logic
+// 
 
-fn post_to_discord(state: AppState, post: BlueskyPost) {
-  let content =
-    message.Create(..message.new_create(), content: option.Some(post.uri))
-
-  case message.create(state.client, state.channel_id, content) {
+fn post_to_discord(client: client.Client, state: AppState, post: BlueskyPost) {
+  case
+    rest.send_message(
+      client,
+      state.channel_id,
+      api.MessageContent(text: post.uri, embeds: []),
+    )
+  {
     Ok(msg) -> {
-      case message.crosspost(state.client, state.channel_id, msg.id) {
+      logging.log(logging.Info, "[discord] created message ID #" <> msg.id)
+
+      case rest.crosspost_message(client, msg) {
         Ok(_) ->
-          logging.log(logging.Info, "[discord] published (announced) message")
+          logging.log(logging.Info, "[discord] successfully announced message")
         Error(err) ->
           logging.log(
             logging.Error,
-            "[discord] failed to announce message: " <> string.inspect(err),
+            "[discord] could not announce message: " <> string.inspect(err),
           )
       }
-      logging.log(logging.Info, "[discord] message sent")
     }
     Error(err) ->
       logging.log(
         logging.Error,
-        "[discord] failed to send message: " <> string.inspect(err),
+        "[discord] could not post message: " <> string.inspect(err),
       )
   }
 }
 
-fn check_and_post(state: AppState) -> AppState {
+fn check_and_post(client: client.Client, state: AppState) -> AppState {
   case latest_bsky_posts(bluesky_actor, 50) {
     Ok(posts) -> {
       // Only make posts that have existed for at least 5 minutes
@@ -281,7 +276,7 @@ fn check_and_post(state: AppState) -> AppState {
             "Found a matching post: " <> matching.text <> " at " <> matching.uri,
           )
 
-          post_to_discord(state, matching)
+          post_to_discord(client, state, matching)
 
           case write_cache(matching) {
             Ok(_) ->
@@ -335,7 +330,7 @@ pub fn latest_bsky_posts(
     |> request.set_path("/xrpc/app.bsky.feed.getAuthorFeed")
     |> request.set_query([#("actor", actor), #("limit", int.to_string(limit))])
     |> request.set_header("connection", "keep-alive")
-    |> request.set_header("user-agent", "pablo_pixarto/bot1.0.0")
+    |> request.set_header("user-agent", "pablo_pixarto/bot@2.0.0")
 
   case httpc.send(req) {
     Ok(response.Response(status:, body:, ..)) if status == 200 ->
